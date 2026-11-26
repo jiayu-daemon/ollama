@@ -77,11 +77,38 @@ func chatPrompt(ctx context.Context, m *Model, tokenize tokenizeFunc, opts *api.
 		slog.Debug("truncating input messages which exceed context length", "truncated", len(msgs[currMsgIdx:]))
 	}
 
-	renderMsgs := slices.Clone(msgs)
+	renderMsgs, media, err := imageTaggedMessages(m, msgs, currMsgIdx, false)
+	if err != nil {
+		return "", nil, err
+	}
 
-	for cnt, msg := range renderMsgs[currMsgIdx:] {
+	renderMsgs = append(system, renderMsgs[currMsgIdx:]...)
+	if len(media) > 0 && m.IsMLX() && m.Config.Renderer == "inkling2" {
+		prompt, offsets, err := renderers.RenderInkling2WithImages(renderMsgs, tools, think)
+		if err != nil {
+			return "", nil, err
+		}
+		for i := range media {
+			media[i].TagOffsets = offsets[media[i].ID]
+		}
+		return prompt, media, nil
+	}
+
+	p, err := renderPrompt(m, renderMsgs, tools, think)
+	if err != nil {
+		return "", nil, err
+	}
+
+	return p, media, nil
+}
+
+func imageTaggedMessages(m *Model, msgs []api.Message, start int, clearImages bool) ([]api.Message, []llm.MediaData, error) {
+	renderMsgs := slices.Clone(msgs)
+	var media []llm.MediaData
+
+	for cnt, msg := range renderMsgs[start:] {
 		if slices.Contains(m.Config.ModelFamilies, "mllama") && len(msg.Images) > 1 {
-			return "", nil, errors.New("this model only supports one image while more than one image requested")
+			return nil, nil, errors.New("this model only supports one image while more than one image requested")
 		}
 
 		var prefix string
@@ -105,20 +132,15 @@ func chatPrompt(ctx context.Context, m *Model, tokenize tokenizeFunc, opts *api.
 			}
 		}
 
-		if m.Config.Renderer != "" {
-			continue
+		if m.Config.Renderer == "" {
+			renderMsgs[start+cnt].Content = prefix + prompt
 		}
-
-		renderMsgs[currMsgIdx+cnt].Content = prefix + prompt
+		if clearImages {
+			renderMsgs[start+cnt].Images = nil
+		}
 	}
 
-	// truncate any messages that do not fit into the context window
-	p, err := renderPrompt(m, append(system, renderMsgs[currMsgIdx:]...), tools, think)
-	if err != nil {
-		return "", nil, err
-	}
-
-	return p, media, nil
+	return renderMsgs, media, nil
 }
 
 func renderPrompt(m *Model, msgs []api.Message, tools []api.Tool, think *api.ThinkValue) (string, error) {
